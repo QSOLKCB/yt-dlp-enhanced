@@ -81,11 +81,13 @@ class SunoIE(InfoExtractor):
         # The prefetched query can occur after multiline React Flight text rows.
         # Decode the JSON strings without interpreting JavaScript or fetching media.
         chunks = []
-        for segment in re.findall(r'<script\b[^>]*>self\.__next_f\.push\((\[[^\r\n]*?\])\)</script>', webpage):
+        for segment in re.findall(r'<script\b[^>]*>self\.__next_f\.push\((.*?)</script>', webpage, flags=re.DOTALL):
+            if not segment.endswith(')'):
+                raise ExtractorError('Invalid Suno Flight segment', expected=True)
             try:
-                payload = json.loads(segment)
-            except (ValueError, RecursionError):
-                continue
+                payload = json.loads(segment[:-1])
+            except (ValueError, RecursionError) as e:
+                raise ExtractorError('Invalid Suno Flight segment', expected=True) from e
             if (isinstance(payload, list) and len(payload) == 2
                     and type(payload[0]) is int and payload[0] == 1 and isinstance(payload[1], str)):
                 chunks.append(payload[1])

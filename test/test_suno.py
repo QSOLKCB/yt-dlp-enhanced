@@ -229,6 +229,30 @@ class TestSuno(unittest.TestCase):
         with self.assertRaisesRegex(ExtractorError, 'Truncated'):
             self._extract(self._flight_page(genuine + ':HL[]'))
 
+    def test_malformed_flight_segments_fail_closed(self):
+        genuine = 'b:' + json.dumps(self._model(self.clip)) + '\n'
+        conflict = 'c:' + json.dumps(self._model(dict(self.clip, title='Conflicting title'))) + '\n'
+        encoded_conflict = json.dumps([1, conflict])
+        valid_page = self._flight_page(genuine)
+
+        for bad_payload in (encoded_conflict[:-1] + ',]', encoded_conflict[:-1], 'not-json'):
+            bad_segment = f'<script>self.__next_f.push({bad_payload})</script>'
+            for page in (bad_segment, valid_page + bad_segment, bad_segment + valid_page):
+                with self.subTest(payload=bad_payload, page=page), self.assertRaisesRegex(
+                        ExtractorError, 'Invalid Suno Flight segment') as error:
+                    self._extract(page)
+                self.assertTrue(error.exception.expected)
+
+        missing_close = f'<script>self.__next_f.push({encoded_conflict}</script>'
+        with self.assertRaisesRegex(ExtractorError, 'Invalid Suno Flight segment'):
+            self._extract(valid_page + missing_close)
+
+        # Valid non-data segments remain ignorable, and valid multiline JSON is accepted.
+        bootstrap = '<script>self.__next_f.push([0])</script>'
+        model = f'<script>self.__next_f.push({json.dumps([1, genuine], indent=2)})</script>'
+        result = self._extract(bootstrap + model)
+        self.assertEqual(result['title'], self.clip['title'])
+
     def test_malformed_flight_rows_fail_closed(self):
         genuine = 'b:' + json.dumps(self._model(self.clip)) + '\n'
         for bad in ('a:Tx,hello', 'a:Tffff,hello', 'a:T1,é', 'garbage\n', 'a:{\n'):
