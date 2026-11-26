@@ -512,6 +512,67 @@ class TestSuno(unittest.TestCase):
         flight = 'a:' + json.dumps(model) + '\nb:' + json.dumps(self._model(self.clip)) + '\n'
         self.assertEqual(self._extract(self._flight_page(flight))['id'], self._ID)
 
+    def test_production_query_schema(self):
+        def structured(clip, key=None):
+            model = self._model(clip)
+            query = model[3]['prefetched']['dehydratedState']['queries'][0]
+            query['queryKey'] = key if key is not None else [{
+                'scope': 'clips', 'entity': 'clips', 'clipId': clip['id'],
+            }]
+            return model
+
+        def page(*models):
+            return self._flight_page(''.join(f'{i:x}:{json.dumps(model)}\n' for i, model in enumerate(models)))
+
+        legacy = self._model(self.clip)
+        production = structured(self.clip)
+        uppercase = structured(dict(self.clip, id=self._ID.upper()))
+        for models in ((production,), (uppercase,), (legacy, production), (production, legacy),
+                       (production, uppercase), (uppercase, production)):
+            with self.subTest(models=models):
+                result = self._extract(page(*models))
+                self.assertEqual(result['id'], self._ID)
+                self.assertEqual(result['title'], self.clip['title'])
+                self.assertEqual(result['formats'], [])
+                self.assertNotIn('url', result)
+                self.assertEqual(result['resource_capabilities']['visibility'], 'public')
+                self.assertTrue(all(value == 'unknown' for key, value in result['resource_capabilities'].items()
+                                    if key != 'visibility'))
+
+        for conflict in (structured(dict(self.clip, title='Conflicting title')),
+                         structured(dict(self.clip, is_public=False)),
+                         structured(dict(self.clip, metadata={'duration': True}))):
+            for models in ((legacy, conflict), (conflict, legacy), (production, conflict), (conflict, production)):
+                with self.subTest(models=models), self.assertRaisesRegex(ExtractorError, 'Conflicting'):
+                    self._extract(page(*models))
+
+        other = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+        canonical = {'scope': 'clips', 'entity': 'clips', 'clipId': self._ID}
+        malformed = (
+            [dict(canonical, scope='other')], [dict(canonical, entity='other')],
+            [dict(canonical, scope=None)], [dict(canonical, entity=1)],
+            [dict(canonical, clipId=None)], [dict(canonical, clipId=1)],
+            [dict(canonical, clipId=other)], [dict(canonical, clipId='invalid')],
+            [{'scope': 'clips', 'entity': 'clips'}], [dict(canonical, extra=True)],
+            [canonical, 'extra'], canonical,
+        )
+        for key in malformed:
+            model = structured(self.clip, key)
+            for models in ((model,), (production, model), (model, production)):
+                with self.subTest(key=key), self.assertRaisesRegex(ExtractorError, 'query identity'):
+                    self._extract(page(*models))
+
+        for key in ([canonical], [dict(canonical, scope='other')],
+                    [dict(canonical, entity='other')], [dict(canonical, extra=True)], [canonical, 'extra']):
+            mismatch = structured(dict(self.clip, id=other), key)
+            for models in ((mismatch, production), (production, mismatch)):
+                with self.subTest(key=key), self.assertRaisesRegex(ExtractorError, 'query identity'):
+                    self._extract(page(*models))
+
+        for unrelated in (structured(dict(self.clip, id=other)),
+                          structured(dict(self.clip, id=other), [dict(canonical, scope='other', entity='other')])):
+            self.assertEqual(self._extract(page(unrelated, production))['id'], self._ID)
+
     def test_duplicate_duration_types(self):
         for pair in ((True, 1), (False, 0), (1, 1.0)):
             for values in (pair, pair[::-1]):
