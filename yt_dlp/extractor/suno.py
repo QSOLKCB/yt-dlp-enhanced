@@ -292,15 +292,40 @@ class SunoIE(InfoExtractor):
                     query_key = query.get('queryKey')
                     candidate = traverse_obj(query, ('state', 'data', {dict}))
                     candidate_id = candidate.get('id') if candidate else None
-                    clip_key = isinstance(query_key, list) and query_key and query_key[0] == 'clips'
-                    key_id = query_key[1] if clip_key and len(query_key) >= 2 else None
+                    key_head = query_key[0] if isinstance(query_key, list) and query_key else None
+                    if isinstance(key_head, dict):
+                        # Live Suno pages use a structured clips cache key.
+                        # Retain relevance even when one discriminator or the shape is invalid.
+                        key_id = key_head.get('clipId') if 'clips' in (key_head.get('scope'), key_head.get('entity')) else None
+                        structured_key = (len(query_key) == 1
+                                          and key_head.keys() == {'scope', 'entity', 'clipId'}
+                                          and key_head['scope'] == 'clips')
+                        clip_key = structured_key and key_head['entity'] == 'clips'
+                        if structured_key and isinstance(key_id, str) and re.fullmatch(self._UUID, key_id):
+                            # These observed auxiliary queries reference a song but
+                            # do not supply its authoritative clip record. Only
+                            # ignore their non-clip payloads, never a contradictory
+                            # clip disguised under an auxiliary namespace.
+                            state = query.get('state')
+                            if isinstance(state, dict) and 'data' in state:
+                                data = state['data']
+                                if (key_head['entity'] == 'clipAttribution'
+                                        and isinstance(data, dict) and data.keys() == {'source_clips'}):
+                                    continue
+                                if (key_head['entity'] == 'clipRoots'
+                                        and (data is None or isinstance(data, list)
+                                             or (isinstance(data, dict) and not data))):
+                                    continue
+                    else:
+                        key_id = query_key[1] if key_head == 'clips' and len(query_key) >= 2 else None
+                        clip_key = key_head == 'clips' and len(query_key) == 2
                     key_id = key_id.lower() if isinstance(key_id, str) and re.fullmatch(self._UUID, key_id) else None
                     candidate_id = candidate_id.lower() if isinstance(candidate_id, str) and re.fullmatch(self._UUID, candidate_id) else None
                     # An unrelated query can be ignored, but a contradiction involving
                     # the requested song cannot be discarded in favour of a later record.
                     if video_id not in (key_id, candidate_id):
                         continue
-                    if not clip_key or len(query_key) != 2 or key_id != video_id or candidate_id != video_id:
+                    if not clip_key or key_id != video_id or candidate_id != video_id:
                         raise ExtractorError('Inconsistent Suno query identity', expected=True)
                     if type(candidate.get('is_public')) is not bool:
                         raise ExtractorError('Invalid Suno visibility flag', expected=True)
