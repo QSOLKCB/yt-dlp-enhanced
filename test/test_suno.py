@@ -334,7 +334,9 @@ class TestSuno(unittest.TestCase):
             with self.subTest(attrs=attrs):
                 self.assertEqual(self._extract(public.replace('<script>', f'<script {attrs}>'))['title'], self.clip['title'])
                 conflict = private.replace('<script>', f'<script {attrs}>')
-                for page in (public + conflict, conflict + public):
+                # Compare records within the same supported script phase.
+                same_phase_public = public.replace('<script>', f'<script {attrs}>')
+                for page in (same_phase_public + conflict, conflict + same_phase_public):
                     with self.assertRaisesRegex(ExtractorError, 'Conflicting'):
                         self._extract(page)
 
@@ -354,6 +356,63 @@ class TestSuno(unittest.TestCase):
                 conflict = private.replace('<script>', f'<script {attrs}>')
                 for page in (public + conflict, conflict + public):
                     self.assertEqual(self._extract(page)['title'], self.clip['title'])
+
+    def test_flight_execution_phases(self):
+        # SUNO-RQ4-001: reproduce both order-sensitive split directions.
+        clip = dict(self.clip, title='MODULE ORDER', metadata={'duration': 12.5},
+                    audio_url='https://example.invalid/forbidden.mp3')
+        flight = 'b:' + json.dumps(self._model(clip), separators=(',', ':')) + '\n'
+        prefix, suffix = flight[:len(flight) // 2], flight[len(flight) // 2:]
+
+        def script(chunk, attrs=''):
+            return f'<script{attrs}>self.__next_f.push({json.dumps([1, chunk])})</script>'
+
+        bootstrap = '<script>(self.__next_f=self.__next_f||[]).push([0]);</script>'
+        module = ' type="module"'
+        legacy = ' for="window" event="onload"'
+        for first, second in ((prefix, suffix), (suffix, prefix)):
+            for classic in ('', legacy):
+                for page in (script(first, module) + script(second, classic),
+                             script(first, classic) + script(second, module)):
+                    for init in ('', bootstrap):
+                        with self.subTest(page=page, init=init), self.assertRaisesRegex(
+                                ExtractorError, 'Mixed Suno Flight execution phases') as error:
+                            self._extract(init + page)
+                        self.assertTrue(error.exception.expected)
+
+        for attrs in ('', module):
+            page = script(prefix, attrs) + script(suffix, attrs)
+            for unrelated in ('', '<script type="module" async>console.log(1)</script>',
+                              '<script>console.log(2)</script>'):
+                with self.subTest(attrs=attrs, unrelated=unrelated):
+                    result = self._extract(unrelated + page)
+                    self.assertEqual(result['title'], 'MODULE ORDER')
+                    self.assertEqual(result['formats'], [])
+                    self.assertNotIn('url', result)
+                    self.assertEqual(result['resource_capabilities']['visibility'], 'public')
+                    self.assertTrue(all(value == 'unknown' for key, value in result['resource_capabilities'].items()
+                                        if key != 'visibility'))
+        with self.assertRaisesRegex(ExtractorError, 'Mixed Suno Flight execution phases'):
+            self._extract(bootstrap + script(flight, module))
+        with self.assertRaisesRegex(ExtractorError, 'Unsupported Suno Flight script'):
+            self._extract(script(flight, ' type="module" async'))
+
+    def test_ambiguous_script_authority(self):
+        # OBS-004-VT: reject rather than silently discard a possible conflict.
+        public = self._page(self.clip)
+        private = self._page(dict(self.clip, is_public=False))
+        for attrs in ('type="text/javascript\v"', 'type="\vtext/javascript"',
+                      'for="window\v" event="onload"', 'for="window" event="onload\v"',
+                      'type="text/javascript&#11;"'):
+            ambiguous = private.replace('<script>', f'<script {attrs}>')
+            for page in (public.replace('<script>', f'<script {attrs}>'),
+                         public + ambiguous, ambiguous + public):
+                with self.subTest(attrs=attrs, page=page), self.assertRaisesRegex(
+                        ExtractorError, 'Unsupported Suno Flight script authority') as error:
+                    self._extract(page)
+                self.assertTrue(error.exception.expected)
+            result = self._extract(f'<script {attrs}>console.log(1)</script>' + public)
+            self.assertEqual(result['title'], self.clip['title'])
 
     def test_flight_discovery_limits(self):
         with patch.object(_FlightScripts, 'MAX_PAGE_BYTES', 100):

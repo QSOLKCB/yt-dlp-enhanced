@@ -44,6 +44,8 @@ class _FlightScripts(HTMLParser):
         self._templates = 0
         self._plaintext = False
         self._script = None
+        self._script_phase = None
+        self._flight_phase = None
 
     @staticmethod
     def _script_type(attrs):
@@ -90,10 +92,20 @@ class _FlightScripts(HTMLParser):
             if self._count > self.MAX_SCRIPTS:
                 raise ExtractorError('Too many Suno Flight scripts', expected=True)
             attrs = {key: value or '' for key, value in reversed(attrs)}
+            if self._templates or 'src' in attrs:
+                return
             script_type = self._script_type(attrs)
-            if (not self._templates and 'src' not in attrs and script_type
-                    and (script_type == 'module' or 'nomodule' not in attrs)):
-                self._script = []
+            if any('\v' in attrs.get(key, '') for key in ('type', 'language', 'for', 'event')):
+                # Browser control-character handling differs from HTML whitespace.
+                # Inspect the body only to reject ambiguous Flight declarations.
+                self._script_phase = 'ambiguous'
+            elif script_type == 'module' and 'async' in attrs:
+                self._script_phase = 'async'
+            elif script_type and (script_type == 'module' or 'nomodule' not in attrs):
+                self._script_phase = script_type
+            else:
+                return
+            self._script = []
 
     def handle_startendtag(self, tag, attrs):
         # A slash does not close non-void HTML raw-text elements or templates.
@@ -115,6 +127,13 @@ class _FlightScripts(HTMLParser):
         self._script = None
         if '__next_f' not in script:
             return
+        if self._script_phase in ('ambiguous', 'async'):
+            raise ExtractorError('Unsupported Suno Flight script authority or execution phase', expected=True)
+        # Classic and deferred module pushes do not necessarily execute in
+        # document order. Never join a mixed stream or guess its scheduling.
+        if self._flight_phase is not None and self._flight_phase != self._script_phase:
+            raise ExtractorError('Mixed Suno Flight execution phases', expected=True)
+        self._flight_phase = self._script_phase
         match = self._PUSH.match(script)
         script = script.removesuffix(';').rstrip()
         if not match or not script.endswith(')'):
