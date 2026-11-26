@@ -314,7 +314,7 @@ class SunoIE(InfoExtractor):
                                     continue
                                 if (key_head['entity'] == 'clipRoots'
                                         and (data is None or isinstance(data, list)
-                                             or isinstance(data, dict) and not data)):
+                                             or (isinstance(data, dict) and not data))):
                                     continue
                     else:
                         key_id = query_key[1] if key_head == 'clips' and len(query_key) >= 2 else None
