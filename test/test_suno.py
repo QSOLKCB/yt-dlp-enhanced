@@ -573,6 +573,49 @@ class TestSuno(unittest.TestCase):
                           structured(dict(self.clip, id=other), [dict(canonical, scope='other', entity='other')])):
             self.assertEqual(self._extract(page(unrelated, production))['id'], self._ID)
 
+    def test_production_ancillary_queries(self):
+        def query(entity, data, **key_fields):
+            return {
+                'queryKey': [dict(scope='clips', entity=entity, clipId=self._ID, **key_fields)],
+                'state': {'data': data},
+            }
+
+        def page(*queries):
+            model = self._model()
+            model[3]['prefetched']['dehydratedState']['queries'] = queries
+            return self._flight_page('b:' + json.dumps(model) + '\n')
+
+        canonical = query('clips', self.clip)
+        attribution = query('clipAttribution', {'source_clips': []})
+        # The live diagnostic reports no top-level clip fields for clipRoots.
+        # Exercise possible empty/non-record shapes, not a claimed wire type.
+        for data in (None, [], {}, [{'id': self._ID, 'is_public': False}]):
+            roots = query('clipRoots', data)
+            for queries in ((canonical, attribution, roots), (roots, attribution, canonical),
+                            (attribution, canonical, roots)):
+                with self.subTest(data=data, queries=queries):
+                    result = self._extract(page(*queries))
+                    self.assertEqual(result['id'], self._ID)
+                    self.assertEqual(result['title'], self.clip['title'])
+                    self.assertEqual(result['formats'], [])
+                    self.assertTrue(all(value == 'unknown' for key, value in result['resource_capabilities'].items()
+                                        if key != 'visibility'))
+            with self.assertRaisesRegex(ExtractorError, 'metadata unavailable'):
+                self._extract(page(attribution, roots))
+
+        for entity in ('clipAttribution', 'clipRoots'):
+            for data in (dict(self.clip, is_public=False), self.clip, {'is_public': False}, {'id': self._ID}):
+                disguised = query(entity, data)
+                for queries in ((canonical, disguised), (disguised, canonical)):
+                    with self.subTest(entity=entity, data=data), self.assertRaisesRegex(
+                            ExtractorError, 'query identity'):
+                        self._extract(page(*queries))
+        for malformed in (query('clipAttribution', {'source_clips': []}, extra=True),
+                          query('clipRoots', [], extra=True), query('unknown', {})):
+            for queries in ((canonical, malformed), (malformed, canonical)):
+                with self.subTest(query=malformed), self.assertRaisesRegex(ExtractorError, 'query identity'):
+                    self._extract(page(*queries))
+
     def test_duplicate_duration_types(self):
         for pair in ((True, 1), (False, 0), (1, 1.0)):
             for values in (pair, pair[::-1]):

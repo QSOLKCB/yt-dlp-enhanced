@@ -297,8 +297,25 @@ class SunoIE(InfoExtractor):
                         # Live Suno pages use a structured clips cache key.
                         # Retain relevance even when one discriminator or the shape is invalid.
                         key_id = key_head.get('clipId') if 'clips' in (key_head.get('scope'), key_head.get('entity')) else None
-                        clip_key = (len(query_key) == 1 and key_head.keys() == {'scope', 'entity', 'clipId'}
-                                    and key_head['scope'] == key_head['entity'] == 'clips')
+                        structured_key = (len(query_key) == 1
+                                          and key_head.keys() == {'scope', 'entity', 'clipId'}
+                                          and key_head['scope'] == 'clips')
+                        clip_key = structured_key and key_head['entity'] == 'clips'
+                        if structured_key and isinstance(key_id, str) and re.fullmatch(self._UUID, key_id):
+                            # These observed auxiliary queries reference a song but
+                            # do not supply its authoritative clip record. Only
+                            # ignore their non-clip payloads, never a contradictory
+                            # clip disguised under an auxiliary namespace.
+                            state = query.get('state')
+                            if isinstance(state, dict) and 'data' in state:
+                                data = state['data']
+                                if (key_head['entity'] == 'clipAttribution'
+                                        and isinstance(data, dict) and data.keys() == {'source_clips'}):
+                                    continue
+                                if (key_head['entity'] == 'clipRoots'
+                                        and (data is None or isinstance(data, list)
+                                             or isinstance(data, dict) and not data)):
+                                    continue
                     else:
                         key_id = query_key[1] if key_head == 'clips' and len(query_key) >= 2 else None
                         clip_key = key_head == 'clips' and len(query_key) == 2
