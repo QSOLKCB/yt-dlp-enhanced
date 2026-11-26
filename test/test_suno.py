@@ -301,7 +301,8 @@ class TestSuno(unittest.TestCase):
         conflict = 'c:' + json.dumps(self._model(dict(self.clip, is_public=False))) + '\n'
         encoded = json.dumps([1, conflict])
         for script in (f'<SCRIPT>\n self.__next_f.push ({encoded}); \n</SCRIPT>',
-                       f'<script>self . __next_f . push({encoded})</script>'):
+                       f'<script>self . __next_f . push({encoded})</script>',
+                       f'<script type="text/javascript; charset=utf-8">self.__next_f.push({encoded})</script>'):
             with self.subTest(script=script), self.assertRaisesRegex(ExtractorError, 'Conflicting'):
                 self._extract(valid + script)
         for script in (f'<script>/* prefix */self.__next_f.push({encoded})</script>',
@@ -310,7 +311,8 @@ class TestSuno(unittest.TestCase):
                 self._extract(valid + script)
         for inert in (f'<!--{valid}-->', f"<div data-text='{valid}'></div>",
                       f'<textarea>{valid}</textarea>', f'<template>{valid}</template>',
-                      f'<title>{valid}</title>', f'<script type="application/json">{encoded}</script>'):
+                      f'<title>{valid}</title>',
+                      f'<script type="application/json">self.__next_f.push({encoded})</script>'):
             with self.subTest(inert=inert), self.assertRaisesRegex(ExtractorError, 'metadata unavailable'):
                 self._extract(inert)
         self.assertEqual(self._extract(
@@ -347,7 +349,8 @@ class TestSuno(unittest.TestCase):
         other = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
         for key, candidate_id in ((['clips'], self._ID), (['clips', other], self._ID),
                                   (['clips', None], self._ID), (['clips', 7], self._ID),
-                                  (['clips', self._ID, other], self._ID), (['clips', self._ID], other)):
+                                  (['clips', self._ID, other], self._ID),
+                                  (['clips', self._ID, other], other), (['clips', self._ID], other)):
             model = self._model(dict(self.clip, id=candidate_id))
             model[3]['prefetched']['dehydratedState']['queries'][0]['queryKey'] = key
             for models in ((model, self._model(self.clip)), (self._model(self.clip), model)):

@@ -57,7 +57,7 @@ class _FlightScripts(HTMLParser):
             if self._count > self.MAX_SCRIPTS:
                 raise ExtractorError('Too many Suno Flight scripts', expected=True)
             attrs = dict(attrs)
-            script_type = (attrs.get('type') or '').strip().lower()
+            script_type = (attrs.get('type') or '').partition(';')[0].strip().lower()
             if (not self._templates and 'src' not in attrs
                     and script_type in ('', 'module', 'text/javascript', 'application/javascript',
                                         'text/ecmascript', 'application/ecmascript')):
@@ -209,20 +209,23 @@ class SunoIE(InfoExtractor):
                         continue
                     candidate = traverse_obj(query, ('state', 'data', {dict}))
                     candidate_id = candidate.get('id') if candidate else None
-                    key_id = query_key[1] if len(query_key) == 2 else None
+                    key_id = query_key[1] if len(query_key) >= 2 else None
                     key_id = key_id.lower() if isinstance(key_id, str) and re.fullmatch(self._UUID, key_id) else None
                     candidate_id = candidate_id.lower() if isinstance(candidate_id, str) and re.fullmatch(self._UUID, candidate_id) else None
                     # An unrelated query can be ignored, but a contradiction involving
                     # the requested song cannot be discarded in favour of a later record.
                     if video_id not in (key_id, candidate_id):
                         continue
-                    if key_id != video_id or candidate_id != video_id:
+                    if len(query_key) != 2 or key_id != video_id or candidate_id != video_id:
                         raise ExtractorError('Inconsistent Suno query identity', expected=True)
                     if type(candidate.get('is_public')) is not bool:
                         raise ExtractorError('Invalid Suno visibility flag', expected=True)
                     candidate = {**candidate, 'id': video_id}
                     # JSON representation preserves boolean/number type distinctions.
-                    identity = json.dumps(candidate, sort_keys=True)
+                    try:
+                        identity = json.dumps(candidate, sort_keys=True)
+                    except (ValueError, RecursionError) as e:
+                        raise ExtractorError('Invalid Suno song metadata', expected=True) from e
                     if clip_identity is not None and clip_identity != identity:
                         raise ExtractorError('Conflicting Suno song metadata', expected=True)
                     clip, clip_identity = candidate, identity
