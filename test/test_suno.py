@@ -415,6 +415,40 @@ class TestSuno(unittest.TestCase):
             result = self._extract(f'<script {attrs}>console.log(1)</script>' + public)
             self.assertEqual(result['title'], self.clip['title'])
 
+    def test_irrelevant_vertical_tab_attributes(self):
+        public = self._page(self.clip)
+        private = self._page(dict(self.clip, is_public=False))
+        for attrs in ('data-note="&#11;"', 'data-note="&#x0B;"', 'data-note="&#00011"',
+                      'id="&#x000B"', 'data-&#11;="x"', 'data-&#xB;="x"',
+                      'type="text/javascript" type="application/json&#11;"',
+                      'type="text/javascript" language="json&#xB;"',
+                      'type="text/javascript" language="json\v"',
+                      'for="window&#11;"', 'event="onload\v"',
+                      'for="window" for="window&#11;" event="onload"',
+                      'data-note="type=&#11;"', 'data-note=&#11;'):
+            with self.subTest(attrs=attrs):
+                result = self._extract(public.replace('<script>', f'<script {attrs}>'))
+                self.assertEqual(result['title'], self.clip['title'])
+                self.assertEqual(result['formats'], [])
+                inert = private.replace('<script>', f'<script type="application/json" {attrs}>')
+                for page in (public + inert, inert + public):
+                    self.assertEqual(self._extract(page)['title'], self.clip['title'])
+        module = public.replace('<script>', '<script type="module" for="window&#11;" event="onload\v">')
+        self.assertEqual(self._extract(module)['title'], self.clip['title'])
+
+    def test_effective_vertical_tab_references(self):
+        public = self._page(self.clip)
+        private = self._page(dict(self.clip, is_public=False))
+        for attrs in ('language="javascript&#11;"', 'for="window&#11;" event="onload"',
+                      'for="window" event="onload&#xB;"', 'type=text/javascript&#11;',
+                      'type="text/javascript&#11;" type="text/javascript"',
+                      'type="text/javascript&#00011z"', 'type="text/javascript&#x000Bz"'):
+            conflict = private.replace('<script>', f'<script {attrs}>')
+            for page in (conflict, public + conflict, conflict + public):
+                with self.subTest(attrs=attrs), self.assertRaisesRegex(
+                        ExtractorError, 'Unsupported Suno Flight script authority'):
+                    self._extract(page)
+
     def test_flight_discovery_limits(self):
         with patch.object(_FlightScripts, 'MAX_PAGE_BYTES', 100):
             with self.assertRaisesRegex(ExtractorError, 'webpage exceeds'):

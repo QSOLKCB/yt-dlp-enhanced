@@ -80,6 +80,40 @@ class _FlightScripts(HTMLParser):
             return 'classic'
         return None
 
+    def _ambiguous_authority(self, attrs, effective):
+        mime_key = 'type' if 'type' in effective else 'language'
+        keys = {mime_key}
+        # The legacy event gate applies only to classic scripts, and only
+        # when both attributes are present. Explicit type overrides language.
+        if ('for' in effective and 'event' in effective and 'nomodule' not in effective
+                and self._script_type({k: effective[k] for k in keys if k in effective}) == 'classic'):
+            keys.update(('for', 'event'))
+        if any('\v' in effective.get(key, '') for key in keys):
+            return True
+        if not keys.intersection(effective):
+            return False
+
+        # HTMLParser drops numeric VT references. Reparse just the start tag
+        # with those references changed to form feed (which is retained).
+        # Keep token boundaries and compare values by position, not raw names.
+        raw = self.get_starttag_text()
+        marked = re.sub(r'&#(?:0*11(?![0-9])|[xX]0*[bB](?![0-9a-fA-F]))',
+                        lambda m: m[0][:-1] + ('2' if m[0][-1] == '1' else 'C'), raw)
+        if marked == raw:
+            return False
+        shadow = []
+        parser = HTMLParser(convert_charrefs=False)
+        parser.handle_starttag = lambda tag, values: shadow.extend(values)
+        parser.feed(marked)
+        parser.close()
+        if len(shadow) != len(attrs):
+            return True
+        # Reverse assignment retains the first occurrence of each attribute.
+        changed = {key: value != marked_value
+                   for (key, value), (_, marked_value) in zip(reversed(attrs), reversed(shadow))
+                   if key in keys}
+        return any(changed.values())
+
     def handle_starttag(self, tag, attrs):
         if self._plaintext:
             return
@@ -91,20 +125,17 @@ class _FlightScripts(HTMLParser):
             self._count += 1
             if self._count > self.MAX_SCRIPTS:
                 raise ExtractorError('Too many Suno Flight scripts', expected=True)
-            attrs = {key: value or '' for key, value in reversed(attrs)}
-            if self._templates or 'src' in attrs:
+            effective = {key: value or '' for key, value in reversed(attrs)}
+            if self._templates or 'src' in effective:
                 return
-            script_type = self._script_type(attrs)
-            # HTMLParser may discard numeric references to U+000B while decoding
-            # attributes. Conservatively check the original start tag as well.
-            if (any('\v' in attrs.get(key, '') for key in ('type', 'language', 'for', 'event'))
-                    or re.search(r'&#(?:0*11(?![0-9])|[xX]0*[bB](?![0-9a-fA-F]))', self.get_starttag_text())):
+            script_type = self._script_type(effective)
+            if self._ambiguous_authority(attrs, effective):
                 # Browser control-character handling differs from HTML whitespace.
                 # Inspect the body only to reject ambiguous Flight declarations.
                 self._script_phase = 'ambiguous'
-            elif script_type == 'module' and 'async' in attrs:
+            elif script_type == 'module' and 'async' in effective:
                 self._script_phase = 'async'
-            elif script_type and (script_type == 'module' or 'nomodule' not in attrs):
+            elif script_type and (script_type == 'module' or 'nomodule' not in effective):
                 self._script_phase = script_type
             else:
                 return
