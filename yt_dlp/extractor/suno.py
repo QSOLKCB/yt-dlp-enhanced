@@ -110,7 +110,7 @@ class _FlightScripts(HTMLParser):
             return True
         # Reverse assignment retains the first occurrence of each attribute.
         changed = {key: value != marked_value
-                   for (key, value), (_, marked_value) in zip(reversed(attrs), reversed(shadow))
+                   for (key, value), (_, marked_value) in zip(reversed(attrs), reversed(shadow), strict=True)
                    if key in keys}
         return any(changed.values())
 
