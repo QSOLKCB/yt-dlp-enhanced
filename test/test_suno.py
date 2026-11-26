@@ -14,7 +14,12 @@ class TestSuno(unittest.TestCase):
     _SHARE = 'https://suno.com/s/ExampleShareToken'
 
     def setUp(self):
-        self.ydl = YoutubeDL({'quiet': True, 'no_warnings': True, 'ignore_no_formats_error': True}, auto_init=False)
+        self.ydl = YoutubeDL({
+            'quiet': True,
+            'no_warnings': True,
+            'ignore_no_formats_error': True,
+            'format': 'best',
+        }, auto_init=False)
         self.addCleanup(self.ydl.close)
         self.ie = SunoIE(self.ydl)
         self.clip = {
@@ -47,25 +52,48 @@ class TestSuno(unittest.TestCase):
             + ''.join(f'<script>self.__next_f.push({json.dumps([1, chunk])})</script>'
                       for chunk in (flight[:pos], flight[pos:])))
 
-    def _extract(self, webpage, url=None, final_url=None):
+    def _extract(self, webpage, url=None, final_url=None, *, expected_request=None):
         with patch.object(self.ie, '_download_webpage_handle', return_value=(
                 webpage, SimpleNamespace(url=final_url or self._URL))) as download:
-            result = self.ie._real_extract(url or self._URL)
-            download.assert_called_once()
-            return result
+            try:
+                return self.ie._real_extract(url or self._URL)
+            finally:
+                download.assert_called_once_with(*(expected_request or (self._URL, self._ID)))
 
     def test_url_matching(self):
-        for url in (self._URL, self._SHARE, self._URL + '?sh=example', self._URL + '/'):
+        for url in (self._URL, self._SHARE, self._URL + '?sh=example', self._URL + '/',
+                    'HTTPS://SUNO.COM/song/' + self._ID, 'HtTp://WWW.SuNo.CoM/s/ExampleShareToken'):
             self.assertTrue(SunoIE.suitable(url))
         for url in ('https://suno.com.evil.invalid/song/' + self._ID,
                     self._URL + 'x', self._URL + '/extra', 'https://suno.com/song/not-a-uuid',
-                    'https://suno.com/create'):
+                    'https://suno.com/create', 'https://SUNO.COM/SONG/' + self._ID):
             self.assertFalse(SunoIE.suitable(url))
 
-    def test_metadata_and_no_media(self):
-        for url in (self._URL, self._SHARE):
+    def test_mixed_case_urls(self):
+        for url, request_url, request_id in (
+                ('HTTPS://SUNO.COM/song/' + self._ID, 'https://SUNO.COM/song/' + self._ID, self._ID),
+                ('HtTp://WWW.SuNo.CoM/s/ExampleShareToken', 'https://WWW.SuNo.CoM/s/ExampleShareToken', 'ExampleShareToken'),
+        ):
             with self.subTest(url=url):
-                result = self._extract(self._page(self.clip), url, self._URL + '?sh=example')
+                result = self._extract(
+                    self._page(self.clip), url, 'HTTPS://SUNO.COM/song/' + self._ID.upper(),
+                    expected_request=(request_url, request_id))
+                self.assertEqual(result['id'], self._ID)
+
+    def test_uppercase_clip_id(self):
+        uppercase_clip = dict(self.clip, id=self._ID.upper())
+        for clips in ((uppercase_clip,), (self.clip, uppercase_clip)):
+            with self.subTest(clips=clips):
+                result = self._extract(self._page(*clips))
+                self.assertEqual(result['id'], self._ID)
+        with self.assertRaisesRegex(ExtractorError, 'Conflicting'):
+            self._extract(self._page(self.clip, dict(uppercase_clip, title='Conflicting title')))
+
+    def test_metadata_and_no_media(self):
+        for url, request_id in ((self._URL, self._ID), (self._SHARE, 'ExampleShareToken')):
+            with self.subTest(url=url):
+                result = self._extract(
+                    self._page(self.clip), url, self._URL + '?sh=example', expected_request=(url, request_id))
                 self.assertEqual(result['id'], self._ID)
                 self.assertEqual(result['title'], 'Synthetic song')
                 self.assertEqual(result['uploader'], 'Synthetic artist')
@@ -110,16 +138,33 @@ class TestSuno(unittest.TestCase):
         self.assertEqual(result['thumbnail'], 'https://example.invalid/fallback.jpg')
         self.assertNotIn('duration', result)
 
+    def _process(self, result):
+        return self.ydl.process_video_result({
+            **result,
+            'extractor': self.ie.IE_NAME,
+            'extractor_key': self.ie.ie_key(),
+            'webpage_url': self._URL,
+        }, download=False)
+
     def test_no_formats_default_error(self):
         self.ydl.params['ignore_no_formats_error'] = False
-        with self.assertRaisesRegex(ExtractorError, 'metadata only') as error:
-            self._extract(self._page(self.clip))
-        self.assertTrue(error.exception.expected)
+        result = self._extract(self._page(self.clip))
+        with self.assertRaisesRegex(ExtractorError, 'No video formats found'):
+            self._process(result)
+
+    def test_no_formats_warning_once(self):
+        with patch.object(self.ydl, 'report_warning') as warning:
+            result = self._extract(self._page(self.clip))
+            warning.assert_not_called()
+            processed = self._process(result)
+        self.assertEqual(processed['formats'], [])
+        self.assertEqual(processed['resource_capabilities'], result['resource_capabilities'])
+        self.assertEqual(sum(call.args[0] == 'No video formats found!' for call in warning.call_args_list), 1)
 
     def test_unavailable_or_wrong_song(self):
         for page in ('<html></html>', self._page(dict(self.clip, is_public=False)),
                      self._page(dict(self.clip, is_public=1)), self._page(dict(self.clip, status='pending')),
-                     self._page(dict(self.clip, id='different'))):
+                     self._page(dict(self.clip, id='different')), self._page(dict(self.clip, id=123))):
             with self.subTest(page=page), self.assertRaises(ExtractorError) as error:
                 self._extract(page)
             self.assertTrue(error.exception.expected)

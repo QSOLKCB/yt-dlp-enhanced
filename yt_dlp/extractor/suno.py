@@ -10,7 +10,7 @@ from ..utils.traversal import traverse_obj
 class SunoIE(InfoExtractor):
     IE_DESC = 'Suno (metadata only)'
     _UUID = r'[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}'
-    _VALID_URL = rf'https?://(?:www\.)?suno\.com/(?:song/(?P<id>{_UUID})|s/(?P<share_id>[A-Za-z0-9_-]+))/?(?=[?#]|$)'
+    _VALID_URL = rf'(?i:https?://(?:www\.)?suno\.com)/(?:song/(?P<id>{_UUID})|s/(?P<share_id>[A-Za-z0-9_-]+))/?(?=[?#]|$)'
     _TESTS = [{
         'url': 'https://suno.com/song/01234567-89ab-4cde-8f01-23456789abcd',
         'only_matching': True,
@@ -45,8 +45,12 @@ class SunoIE(InfoExtractor):
                 if not isinstance(query_key, list) or not query_key or query_key[0] != 'clips':
                     continue
                 candidate = traverse_obj(query, ('state', 'data', {dict}))
-                if not candidate or candidate.get('id') != video_id:
+                candidate_id = candidate.get('id') if candidate else None
+                if not isinstance(candidate_id, str) or not re.fullmatch(self._UUID, candidate_id):
                     continue
+                if candidate_id.lower() != video_id:
+                    continue
+                candidate = {**candidate, 'id': video_id}
                 if clip is not None and clip != candidate:
                     raise ExtractorError('Conflicting Suno song metadata', expected=True)
                 clip = candidate
@@ -93,9 +97,6 @@ class SunoIE(InfoExtractor):
             'authentication_required': 'unknown',
             'provenance': 'unknown',
         }
-        self.raise_no_formats(
-            'Suno metadata only: download permission unknown; use the Suno download interface',
-            expected=True, video_id=video_id)
         return {
             **info,
             'id': video_id,
