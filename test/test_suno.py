@@ -301,8 +301,7 @@ class TestSuno(unittest.TestCase):
         conflict = 'c:' + json.dumps(self._model(dict(self.clip, is_public=False))) + '\n'
         encoded = json.dumps([1, conflict])
         for script in (f'<SCRIPT>\n self.__next_f.push ({encoded}); \n</SCRIPT>',
-                       f'<script>self . __next_f . push({encoded})</script>',
-                       f'<script type="text/javascript; charset=utf-8">self.__next_f.push({encoded})</script>'):
+                       f'<script>self . __next_f . push({encoded})</script>'):
             with self.subTest(script=script), self.assertRaisesRegex(ExtractorError, 'Conflicting'):
                 self._extract(valid + script)
         for script in (f'<script>/* prefix */self.__next_f.push({encoded})</script>',
@@ -317,6 +316,37 @@ class TestSuno(unittest.TestCase):
                 self._extract(inert)
         self.assertEqual(self._extract(
             '<script>(self.__next_f=self.__next_f||[]).push([0]);</script>' + valid)['title'], self.clip['title'])
+
+    def test_script_type_authority(self):
+        public = self._flight_page('b:' + json.dumps(self._model(self.clip)) + '\n')
+        private = self._flight_page('c:' + json.dumps(self._model(dict(self.clip, is_public=False))) + '\n')
+        active = (
+            'type="application/x-javascript"', 'type="text/jscript"', 'type="text/javascript1.5"',
+            'type="text/javascript" type="application/json"', 'language="javascript"',
+            'language="javascript" language="json"', 'type="" language="json"',
+            'type="module"', 'type="module" nomodule', 'type="TEXT/JAVASCRIPT"',
+            'type="text/javascript" language="json"',
+        )
+        for attrs in active:
+            with self.subTest(attrs=attrs):
+                self.assertEqual(self._extract(public.replace('<script>', f'<script {attrs}>'))['title'], self.clip['title'])
+                conflict = private.replace('<script>', f'<script {attrs}>')
+                for page in (public + conflict, conflict + public):
+                    with self.assertRaisesRegex(ExtractorError, 'Conflicting'):
+                        self._extract(page)
+
+        inert = (
+            'type="text/javascript; charset=utf-8"', 'type="module;invalid"',
+            'type="application/json" type="text/javascript"', 'language="json"',
+            'language="json" language="javascript"', 'nomodule', 'src=""',
+        )
+        for attrs in inert:
+            with self.subTest(attrs=attrs):
+                with self.assertRaisesRegex(ExtractorError, 'metadata unavailable'):
+                    self._extract(public.replace('<script>', f'<script {attrs}>'))
+                conflict = private.replace('<script>', f'<script {attrs}>')
+                for page in (public + conflict, conflict + public):
+                    self.assertEqual(self._extract(page)['title'], self.clip['title'])
 
     def test_flight_discovery_limits(self):
         with patch.object(_FlightScripts, 'MAX_PAGE_BYTES', 100):
@@ -360,6 +390,26 @@ class TestSuno(unittest.TestCase):
                     self._extract(self._flight_page(flight))
         self.assertEqual(self._extract(self._page(
             dict(self.clip, id=other), self.clip))['id'], self._ID)
+
+    def test_malformed_outer_query_keys(self):
+        for key in (None, 'clips', 1, {}, [], ['other', self._ID]):
+            for missing in (False, True) if key is None else (False,):
+                model = self._model(dict(self.clip, is_public=False))
+                query = model[3]['prefetched']['dehydratedState']['queries'][0]
+                if missing:
+                    del query['queryKey']
+                else:
+                    query['queryKey'] = key
+                for models in ((model, self._model(self.clip)), (self._model(self.clip), model)):
+                    flight = ''.join(f'{i:x}:{json.dumps(value)}\n' for i, value in enumerate(models))
+                    with self.subTest(key=key, missing=missing), self.assertRaisesRegex(
+                            ExtractorError, 'query identity'):
+                        self._extract(self._flight_page(flight))
+        other = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+        model = self._model(dict(self.clip, id=other))
+        model[3]['prefetched']['dehydratedState']['queries'][0]['queryKey'] = ['other', self._ID]
+        flight = 'a:' + json.dumps(model) + '\nb:' + json.dumps(self._model(self.clip)) + '\n'
+        self.assertEqual(self._extract(self._flight_page(flight))['id'], self._ID)
 
     def test_duplicate_duration_types(self):
         for pair in ((True, 1), (False, 0), (1, 1.0)):

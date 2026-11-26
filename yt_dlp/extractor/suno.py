@@ -45,6 +45,27 @@ class _FlightScripts(HTMLParser):
         self._plaintext = False
         self._script = None
 
+    @staticmethod
+    def _script_type(attrs):
+        # HTML retains the first occurrence of a duplicate attribute.
+        # A parameterized type is a data block, not a classic script.
+        script_type = attrs.get('type')
+        if script_type is None:
+            language = attrs.get('language') or ''
+            script_type = f'text/{language}' if language else ''
+        script_type = script_type.strip(' \t\n\r\f').lower()
+        if script_type == 'module':
+            return 'module'
+        if script_type in (
+                '', 'application/ecmascript', 'application/javascript',
+                'application/x-ecmascript', 'application/x-javascript',
+                'text/ecmascript', 'text/javascript', 'text/javascript1.0',
+                'text/javascript1.1', 'text/javascript1.2', 'text/javascript1.3',
+                'text/javascript1.4', 'text/javascript1.5', 'text/jscript',
+                'text/livescript', 'text/x-ecmascript', 'text/x-javascript'):
+            return 'classic'
+        return None
+
     def handle_starttag(self, tag, attrs):
         if self._plaintext:
             return
@@ -56,11 +77,10 @@ class _FlightScripts(HTMLParser):
             self._count += 1
             if self._count > self.MAX_SCRIPTS:
                 raise ExtractorError('Too many Suno Flight scripts', expected=True)
-            attrs = dict(attrs)
-            script_type = (attrs.get('type') or '').partition(';')[0].strip().lower()
-            if (not self._templates and 'src' not in attrs
-                    and script_type in ('', 'module', 'text/javascript', 'application/javascript',
-                                        'text/ecmascript', 'application/ecmascript')):
+            attrs = {key: value or '' for key, value in reversed(attrs)}
+            script_type = self._script_type(attrs)
+            if (not self._templates and 'src' not in attrs and script_type
+                    and (script_type == 'module' or 'nomodule' not in attrs)):
                 self._script = []
 
     def handle_startendtag(self, tag, attrs):
@@ -205,18 +225,17 @@ class SunoIE(InfoExtractor):
             for prefetched in self._prefetched_objects(model):
                 for query in traverse_obj(prefetched, ('dehydratedState', 'queries', ..., {dict})):
                     query_key = query.get('queryKey')
-                    if not isinstance(query_key, list) or not query_key or query_key[0] != 'clips':
-                        continue
                     candidate = traverse_obj(query, ('state', 'data', {dict}))
                     candidate_id = candidate.get('id') if candidate else None
-                    key_id = query_key[1] if len(query_key) >= 2 else None
+                    clip_key = isinstance(query_key, list) and query_key and query_key[0] == 'clips'
+                    key_id = query_key[1] if clip_key and len(query_key) >= 2 else None
                     key_id = key_id.lower() if isinstance(key_id, str) and re.fullmatch(self._UUID, key_id) else None
                     candidate_id = candidate_id.lower() if isinstance(candidate_id, str) and re.fullmatch(self._UUID, candidate_id) else None
                     # An unrelated query can be ignored, but a contradiction involving
                     # the requested song cannot be discarded in favour of a later record.
                     if video_id not in (key_id, candidate_id):
                         continue
-                    if len(query_key) != 2 or key_id != video_id or candidate_id != video_id:
+                    if not clip_key or len(query_key) != 2 or key_id != video_id or candidate_id != video_id:
                         raise ExtractorError('Inconsistent Suno query identity', expected=True)
                     if type(candidate.get('is_public')) is not bool:
                         raise ExtractorError('Invalid Suno visibility flag', expected=True)
