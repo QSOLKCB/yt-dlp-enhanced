@@ -76,6 +76,32 @@ class TestSuno(unittest.TestCase):
                 self.assertEqual(result['formats'], [])
                 self.assertNotIn('url', result)
                 self.assertNotIn('media_urls', result)
+                self.assertEqual(result['resource_capabilities'], {
+                    'visibility': 'public',
+                    'drm': 'unknown',
+                    'copyright_status': 'unknown',
+                    'license': 'unknown',
+                    'download_permission': 'unknown',
+                    'playback_permission': 'unknown',
+                    'authentication_required': 'unknown',
+                    'provenance': 'unknown',
+                })
+
+    def test_undocumented_capability_flags_are_not_authority(self):
+        # These are hypothetical input fields, not a supported Suno contract.
+        for flags in (
+                {'has_drm': False, 'copyright_status': 'public_domain', 'license': 'CC0', 'download_allowed': True},
+                {'has_drm': True, 'copyright_status': 'copyrighted', 'license': 'CC-BY-4.0', 'download_allowed': False},
+                {'is_owned': True, 'provenance': 'verified_suno', 'action_config': {'playback': {'enabled': True}}},
+                {'download_allowed': 'true', 'resource_capabilities': {'download_permission': 'allowed'}},
+        ):
+            with self.subTest(flags=flags):
+                result = self._extract(self._page(dict(self.clip, **flags)))
+                self.assertEqual(result['resource_capabilities']['visibility'], 'public')
+                self.assertTrue(all(value == 'unknown' for key, value in result['resource_capabilities'].items()
+                                    if key != 'visibility'))
+                self.assertEqual(result['formats'], [])
+                self.assertNotIn('url', result)
 
     def test_fallback_metadata(self):
         clip = dict(self.clip, title=None, image_url=None, metadata={'duration': True})

@@ -23,7 +23,7 @@ class SunoIE(InfoExtractor):
         # The prefetched query can occur after multiline React Flight text rows.
         # Decode the JSON strings without interpreting JavaScript or fetching media.
         chunks = []
-        for segment in re.findall(r'<script\b[^>]*>self\.__next_f\.push\((\[[^\r\n]*\])\)</script>', webpage):
+        for segment in re.findall(r'<script\b[^>]*>self\.__next_f\.push\((\[[^\r\n]*?\])\)</script>', webpage):
             try:
                 payload = json.loads(segment)
             except (ValueError, RecursionError):
@@ -41,7 +41,8 @@ class SunoIE(InfoExtractor):
             except (ValueError, RecursionError):
                 continue
             for query in traverse_obj(prefetched, ('dehydratedState', 'queries', ..., {dict})):
-                if traverse_obj(query, ('queryKey', 0)) != 'clips':
+                query_key = query.get('queryKey')
+                if not isinstance(query_key, list) or not query_key or query_key[0] != 'clips':
                     continue
                 candidate = traverse_obj(query, ('state', 'data', {dict}))
                 if not candidate or candidate.get('id') != video_id:
@@ -79,8 +80,22 @@ class SunoIE(InfoExtractor):
         title = info.get('title') or self._og_search_title(webpage)
         if not title:
             raise ExtractorError('Suno song title unavailable', expected=True)
+        # Visibility is declared by the matching song object. No documented
+        # per-song rights or download-permission interface has been established.
+        # Playback URLs, ownership claims and provenance are not download grants.
+        capabilities = {
+            'visibility': 'public',
+            'drm': 'unknown',
+            'copyright_status': 'unknown',
+            'license': 'unknown',
+            'download_permission': 'unknown',
+            'playback_permission': 'unknown',
+            'authentication_required': 'unknown',
+            'provenance': 'unknown',
+        }
         self.raise_no_formats(
-            'Suno metadata only: no authorised download format has been established', expected=True, video_id=video_id)
+            'Suno metadata only: download permission unknown; use the Suno download interface',
+            expected=True, video_id=video_id)
         return {
             **info,
             'id': video_id,
@@ -88,4 +103,5 @@ class SunoIE(InfoExtractor):
             'description': self._og_search_description(webpage),
             'thumbnail': info.get('thumbnail') or url_or_none(self._og_search_thumbnail(webpage)),
             'formats': [],
+            'resource_capabilities': capabilities,
         }
