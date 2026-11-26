@@ -253,6 +253,40 @@ class TestSuno(unittest.TestCase):
         result = self._extract(bootstrap + model)
         self.assertEqual(result['title'], self.clip['title'])
 
+    def test_flight_segment_types(self):
+        genuine = 'b:' + json.dumps(self._model(self.clip)) + '\n'
+        valid_page = self._flight_page(genuine)
+        for payload in ([1], [1, None], [1, 123], [1, {}], [1, []], [1, '', 'extra'],
+                        [3, 'YQ=='], [3], [4, 'unknown'], [True, genuine], [1.0, genuine],
+                        [], {}, [0, genuine], [2]):
+            segment = f'<script>self.__next_f.push({json.dumps(payload)})</script>'
+            for page in (segment, valid_page + segment, segment + valid_page):
+                with self.subTest(payload=payload, page=page), self.assertRaisesRegex(
+                        ExtractorError, 'Flight.*segment') as error:
+                    self._extract(page)
+                self.assertTrue(error.exception.expected)
+
+        fake = json.dumps(self._model(dict(self.clip, title='False song')))
+        for payload in ([0], [2, None], [2, {'state': fake}]):
+            segment = f'<script>self.__next_f.push({json.dumps(payload)})</script>'
+            for page in (segment + valid_page, valid_page + segment):
+                with self.subTest(payload=payload):
+                    self.assertEqual(self._extract(page)['title'], self.clip['title'])
+
+    def test_duplicate_visibility_requires_boolean(self):
+        for visibility in (1, 0, 1.0, 'true', None):
+            malformed = dict(self.clip, is_public=visibility)
+            for clips in ((malformed, self.clip), (self.clip, malformed)):
+                with self.subTest(visibility=visibility, clips=clips), self.assertRaisesRegex(
+                        ExtractorError, 'Invalid Suno visibility flag') as error:
+                    self._extract(self._page(*clips))
+                self.assertTrue(error.exception.expected)
+        private = dict(self.clip, is_public=False)
+        for clips in ((private, self.clip), (self.clip, private)):
+            with self.subTest(clips=clips), self.assertRaisesRegex(ExtractorError, 'Conflicting'):
+                self._extract(self._page(*clips))
+        self.assertEqual(self._extract(self._page(self.clip, self.clip))['title'], self.clip['title'])
+
     def test_malformed_flight_rows_fail_closed(self):
         genuine = 'b:' + json.dumps(self._model(self.clip)) + '\n'
         for bad in ('a:Tx,hello', 'a:Tffff,hello', 'a:T1,é', 'garbage\n', 'a:{\n'):

@@ -88,9 +88,18 @@ class SunoIE(InfoExtractor):
                 payload = json.loads(segment[:-1])
             except (ValueError, RecursionError) as e:
                 raise ExtractorError('Invalid Suno Flight segment', expected=True) from e
-            if (isinstance(payload, list) and len(payload) == 2
-                    and type(payload[0]) is int and payload[0] == 1 and isinstance(payload[1], str)):
+            if not isinstance(payload, list) or not payload or type(payload[0]) is not int:
+                raise ExtractorError('Invalid Suno Flight segment', expected=True)
+            segment_type = payload[0]
+            if segment_type == 1 and len(payload) == 2 and isinstance(payload[1], str):
                 chunks.append(payload[1])
+            elif (segment_type == 0 and len(payload) == 1) or (segment_type == 2 and len(payload) == 2):
+                # Bootstrap and form state are not Flight model data.
+                continue
+            elif segment_type == 3:
+                raise ExtractorError('Unsupported Suno Flight binary segment', expected=True)
+            else:
+                raise ExtractorError('Invalid or unsupported Suno Flight segment', expected=True)
 
         clip = None
         for model in self._flight_models(''.join(chunks)):
@@ -105,6 +114,8 @@ class SunoIE(InfoExtractor):
                         continue
                     if candidate_id.lower() != video_id:
                         continue
+                    if type(candidate.get('is_public')) is not bool:
+                        raise ExtractorError('Invalid Suno visibility flag', expected=True)
                     candidate = {**candidate, 'id': video_id}
                     if clip is not None and clip != candidate:
                         raise ExtractorError('Conflicting Suno song metadata', expected=True)
