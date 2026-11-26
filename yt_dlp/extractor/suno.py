@@ -27,7 +27,8 @@ class SunoIE(InfoExtractor):
             data = flight.encode('utf-8')
         except UnicodeError as e:
             raise ExtractorError('Invalid Suno Flight encoding', expected=True) from e
-        row_header = re.compile(rb'[0-9a-f]+:')
+        # Resource hints alone have no row ID: :H<code><JSON>\n
+        row_header = re.compile(rb'(?:[0-9a-f]+:|:(?=H[A-Za-z]))')
         length_header = re.compile(rb'[TAOobUSsLlGgMmV]([0-9a-f]{1,16}),')
         pos = 0
         while pos < len(data):
@@ -49,6 +50,13 @@ class SunoIE(InfoExtractor):
                 raise ExtractorError('Truncated Suno Flight row', expected=True)
             row = data[pos:end]
             pos = end + 1
+            if header.group() == b':':
+                # Validate the hint payload, but never treat it as a model.
+                try:
+                    json.loads(row[2:].decode('utf-8'))
+                except (ValueError, RecursionError) as e:
+                    raise ExtractorError('Invalid Suno Flight hint', expected=True) from e
+                continue
             if row and row[0] in b'ABCDEFGHIJKLMNOPQRSTUVWXYZ#rx':
                 continue
             try:

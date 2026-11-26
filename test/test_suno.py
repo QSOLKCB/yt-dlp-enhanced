@@ -209,6 +209,26 @@ class TestSuno(unittest.TestCase):
                 result = self._extract(self._flight_page(row + genuine))
                 self.assertEqual(result['title'], self.clip['title'])
 
+    def test_idless_resource_hints(self):
+        hint = ':HL["/_next/static/css/app.css","style"]\n'
+        genuine = 'b:' + json.dumps(self._model(self.clip)) + '\n'
+        fake_hint = ':HL' + json.dumps(self._model(dict(self.clip, title='False song'))) + '\n'
+        for row in (hint, fake_hint):
+            with self.subTest(row=row):
+                with self.assertRaisesRegex(ExtractorError, 'metadata unavailable'):
+                    self._extract(self._flight_page(row))
+                for flight in (row + genuine, genuine + row):
+                    result = self._extract(self._flight_page(flight, split=2))
+                    self.assertEqual(result['title'], self.clip['title'])
+
+    def test_invalid_idless_rows(self):
+        genuine = 'b:' + json.dumps(self._model(self.clip)) + '\n'
+        for row in (':H\n', ':HL\n', ':HLnot-json\n', ':H1[]\n', ':D{}\n', ':{}\n'):
+            with self.subTest(row=row), self.assertRaisesRegex(ExtractorError, 'Flight'):
+                self._extract(self._flight_page(row + genuine))
+        with self.assertRaisesRegex(ExtractorError, 'Truncated'):
+            self._extract(self._flight_page(genuine + ':HL[]'))
+
     def test_malformed_flight_rows_fail_closed(self):
         genuine = 'b:' + json.dumps(self._model(self.clip)) + '\n'
         for bad in ('a:Tx,hello', 'a:Tffff,hello', 'a:T1,é', 'garbage\n', 'a:{\n'):
