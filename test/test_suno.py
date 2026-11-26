@@ -36,13 +36,23 @@ class TestSuno(unittest.TestCase):
             'media_urls': {'playback': 'https://example.invalid/playback.m4a'},
         }
 
-    def _page(self, *clips):
+    @staticmethod
+    def _model(*clips):
         queries = [{'queryKey': ['clips', c['id']], 'state': {'data': c}} for c in clips]
-        flight = 'a:T5,hello\nworld\nb:' + json.dumps({
-            'prefetched': {'dehydratedState': {'queries': queries}},
-        })
+        return ['$', '$L1', None, {'prefetched': {'dehydratedState': {'queries': queries}}}]
+
+    @staticmethod
+    def _text_row(text):
+        return f'a:T{len(text.encode("utf-8")):x},{text}'
+
+    def _page(self, *clips):
+        flight = self._text_row('hello\nworld') + 'b:' + json.dumps(self._model(*clips)) + '\n'
         # Split the embedded object between two Flight script segments.
-        pos = flight.index('dehydratedState') + 5
+        return self._flight_page(flight, split=flight.index('dehydratedState') + 5)
+
+    @staticmethod
+    def _flight_page(flight, *, split=None):
+        pos = len(flight) // 2 if split is None else split
         return (
             '<meta property="og:title" content="Fallback title">'
             '<meta property="og:description" content="Synthetic description">'
@@ -170,6 +180,42 @@ class TestSuno(unittest.TestCase):
             self.assertTrue(error.exception.expected)
         with self.assertRaisesRegex(ExtractorError, 'Conflicting'):
             self._extract(self._page(self.clip, dict(self.clip, title='Conflicting title')))
+
+    def test_query_shaped_text_row_is_not_metadata(self):
+        fake = dict(self.clip, title='False song')
+        # Include a full fake row inside text, as well as non-ASCII UTF-8.
+        text = 'lyric é 🎵\n' + 'c:' + json.dumps(self._model(fake)) + '\n'
+        flight = self._text_row(text)
+        with self.assertRaisesRegex(ExtractorError, 'metadata unavailable'):
+            self._extract(self._flight_page(flight))
+        genuine = 'b:' + json.dumps(self._model(self.clip)) + '\n'
+        # Split the encoded text row across script segments, not just the model.
+        result = self._extract(self._flight_page(flight + genuine, split=flight.index('🎵') + 1))
+        self.assertEqual(result['title'], self.clip['title'])
+
+    def test_query_shaped_model_string_is_not_metadata(self):
+        text = json.dumps(self._model(self.clip))
+        flight = 'a:' + json.dumps({'description': text}) + '\n'
+        with self.assertRaisesRegex(ExtractorError, 'metadata unavailable'):
+            self._extract(self._flight_page(flight))
+
+    def test_tagged_rows_are_not_models(self):
+        fake = json.dumps(self._model(dict(self.clip, title='False song')))
+        genuine = 'b:' + json.dumps(self._model(self.clip)) + '\n'
+        for row in ('a:D' + fake + '\n', f'a:A{len(fake.encode("utf-8")):x},{fake}'):
+            with self.subTest(row=row):
+                with self.assertRaisesRegex(ExtractorError, 'metadata unavailable'):
+                    self._extract(self._flight_page(row))
+                result = self._extract(self._flight_page(row + genuine))
+                self.assertEqual(result['title'], self.clip['title'])
+
+    def test_malformed_flight_rows_fail_closed(self):
+        genuine = 'b:' + json.dumps(self._model(self.clip)) + '\n'
+        for bad in ('a:Tx,hello', 'a:Tffff,hello', 'a:T1,é', 'garbage\n', 'a:{\n'):
+            with self.subTest(bad=bad), self.assertRaisesRegex(ExtractorError, 'Flight'):
+                self._extract(self._flight_page(bad + genuine))
+        with self.assertRaisesRegex(ExtractorError, 'Truncated'):
+            self._extract(self._flight_page(genuine.rstrip('\n')))
 
     def test_invalid_redirect(self):
         for final_url in ('https://example.invalid/song/' + self._ID, self._SHARE,

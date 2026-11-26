@@ -19,6 +19,56 @@ class SunoIE(InfoExtractor):
         'only_matching': True,
     }]
 
+    @staticmethod
+    def _flight_models(flight):
+        # Flight text/binary rows are byte-length framed; model rows end in LF.
+        # Do not resynchronise after a malformed frame or inspect tagged payloads.
+        try:
+            data = flight.encode('utf-8')
+        except UnicodeError as e:
+            raise ExtractorError('Invalid Suno Flight encoding', expected=True) from e
+        row_header = re.compile(rb'[0-9a-f]+:')
+        length_header = re.compile(rb'[TAOobUSsLlGgMmV]([0-9a-f]{1,16}),')
+        pos = 0
+        while pos < len(data):
+            header = row_header.match(data, pos)
+            if not header or header.end() == len(data):
+                raise ExtractorError('Invalid Suno Flight row', expected=True)
+            pos = header.end()
+            if data[pos] in b'TAOobUSsLlGgMmV':
+                length = length_header.match(data, pos)
+                if not length:
+                    raise ExtractorError('Invalid Suno Flight row length', expected=True)
+                pos = length.end() + int(length.group(1), 16)
+                if pos > len(data):
+                    raise ExtractorError('Truncated Suno Flight row', expected=True)
+                continue
+
+            end = data.find(b'\n', pos)
+            if end < 0:
+                raise ExtractorError('Truncated Suno Flight row', expected=True)
+            row = data[pos:end]
+            pos = end + 1
+            if row and row[0] in b'ABCDEFGHIJKLMNOPQRSTUVWXYZ#rx':
+                continue
+            try:
+                yield json.loads(row.decode('utf-8'))
+            except (ValueError, RecursionError) as e:
+                raise ExtractorError('Invalid Suno Flight model', expected=True) from e
+
+    @staticmethod
+    def _prefetched_objects(model):
+        # Traverse decoded containers only, never JSON-looking string values.
+        pending = [model]
+        while pending:
+            value = pending.pop()
+            if isinstance(value, dict):
+                if isinstance(value.get('prefetched'), dict):
+                    yield value['prefetched']
+                pending.extend(value.values())
+            elif isinstance(value, list):
+                pending.extend(value)
+
     def _public_clip(self, webpage, video_id):
         # The prefetched query can occur after multiline React Flight text rows.
         # Decode the JSON strings without interpreting JavaScript or fetching media.
@@ -32,28 +82,23 @@ class SunoIE(InfoExtractor):
                     and type(payload[0]) is int and payload[0] == 1 and isinstance(payload[1], str)):
                 chunks.append(payload[1])
 
-        flight = ''.join(chunks)
-        decoder = json.JSONDecoder()
         clip = None
-        for match in re.finditer(r'(?<!\\)"prefetched"\s*:\s*(?=\{)', flight):
-            try:
-                prefetched, _ = decoder.raw_decode(flight, match.end())
-            except (ValueError, RecursionError):
-                continue
-            for query in traverse_obj(prefetched, ('dehydratedState', 'queries', ..., {dict})):
-                query_key = query.get('queryKey')
-                if not isinstance(query_key, list) or not query_key or query_key[0] != 'clips':
-                    continue
-                candidate = traverse_obj(query, ('state', 'data', {dict}))
-                candidate_id = candidate.get('id') if candidate else None
-                if not isinstance(candidate_id, str) or not re.fullmatch(self._UUID, candidate_id):
-                    continue
-                if candidate_id.lower() != video_id:
-                    continue
-                candidate = {**candidate, 'id': video_id}
-                if clip is not None and clip != candidate:
-                    raise ExtractorError('Conflicting Suno song metadata', expected=True)
-                clip = candidate
+        for model in self._flight_models(''.join(chunks)):
+            for prefetched in self._prefetched_objects(model):
+                for query in traverse_obj(prefetched, ('dehydratedState', 'queries', ..., {dict})):
+                    query_key = query.get('queryKey')
+                    if not isinstance(query_key, list) or not query_key or query_key[0] != 'clips':
+                        continue
+                    candidate = traverse_obj(query, ('state', 'data', {dict}))
+                    candidate_id = candidate.get('id') if candidate else None
+                    if not isinstance(candidate_id, str) or not re.fullmatch(self._UUID, candidate_id):
+                        continue
+                    if candidate_id.lower() != video_id:
+                        continue
+                    candidate = {**candidate, 'id': video_id}
+                    if clip is not None and clip != candidate:
+                        raise ExtractorError('Conflicting Suno song metadata', expected=True)
+                    clip = candidate
         if not clip or clip.get('is_public') is not True or clip.get('status') != 'complete':
             raise ExtractorError('Public Suno song metadata unavailable', expected=True)
         return clip
