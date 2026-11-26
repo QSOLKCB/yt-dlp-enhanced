@@ -95,7 +95,10 @@ class _FlightScripts(HTMLParser):
             if self._templates or 'src' in attrs:
                 return
             script_type = self._script_type(attrs)
-            if any('\v' in attrs.get(key, '') for key in ('type', 'language', 'for', 'event')):
+            # HTMLParser may discard numeric references to U+000B while decoding
+            # attributes. Conservatively check the original start tag as well.
+            if (any('\v' in attrs.get(key, '') for key in ('type', 'language', 'for', 'event'))
+                    or re.search(r'&#(?:0*11(?![0-9])|[xX]0*[bB](?![0-9a-fA-F]))', self.get_starttag_text())):
                 # Browser control-character handling differs from HTML whitespace.
                 # Inspect the body only to reject ambiguous Flight declarations.
                 self._script_phase = 'ambiguous'

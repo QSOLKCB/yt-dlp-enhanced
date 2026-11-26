@@ -403,7 +403,8 @@ class TestSuno(unittest.TestCase):
         private = self._page(dict(self.clip, is_public=False))
         for attrs in ('type="text/javascript\v"', 'type="\vtext/javascript"',
                       'for="window\v" event="onload"', 'for="window" event="onload\v"',
-                      'type="text/javascript&#11;"'):
+                      'type="text/javascript&#11;"', 'type="text/javascript&#x0B;"',
+                      'type="text/javascript&#011"'):
             ambiguous = private.replace('<script>', f'<script {attrs}>')
             for page in (public.replace('<script>', f'<script {attrs}>'),
                          public + ambiguous, ambiguous + public):
