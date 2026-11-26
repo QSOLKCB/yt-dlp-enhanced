@@ -326,6 +326,9 @@ class TestSuno(unittest.TestCase):
             'language="javascript" language="json"', 'type="" language="json"',
             'type="module"', 'type="module" nomodule', 'type="TEXT/JAVASCRIPT"',
             'type="text/javascript" language="json"',
+            'type="MODULE"', 'type="Module"', 'type=" text/javascript "',
+            'type=""', 'type language="json"', 'language="JavaScript"',
+            'for="window" event="onload"', 'for=" WINDOW " event=" OnLoad() "',
         )
         for attrs in active:
             with self.subTest(attrs=attrs):
@@ -339,6 +342,10 @@ class TestSuno(unittest.TestCase):
             'type="text/javascript; charset=utf-8"', 'type="module;invalid"',
             'type="application/json" type="text/javascript"', 'language="json"',
             'language="json" language="javascript"', 'nomodule', 'src=""',
+            'type=" module"', 'type="module "', 'type="\tmodule\n"',
+            'type=" "', 'type="\t"', 'language="javascript "',
+            'language=" javascript"', 'language=" "', 'language="module"',
+            'for="window" event="onclick"', 'for="example" event="onload"',
         )
         for attrs in inert:
             with self.subTest(attrs=attrs):

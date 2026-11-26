@@ -51,18 +51,30 @@ class _FlightScripts(HTMLParser):
         # A parameterized type is a data block, not a classic script.
         script_type = attrs.get('type')
         if script_type is None:
-            language = attrs.get('language') or ''
-            script_type = f'text/{language}' if language else ''
-        script_type = script_type.strip(' \t\n\r\f').lower()
-        if script_type == 'module':
-            return 'module'
-        if script_type in (
-                '', 'application/ecmascript', 'application/javascript',
+            language = attrs.get('language', '')
+            script_type = f'text/{language}' if language else 'text/javascript'
+        elif not script_type:
+            script_type = 'text/javascript'
+        else:
+            if script_type.lower() == 'module':
+                return 'module'
+            # Only classic MIME matching trims HTML whitespace. A blank but
+            # nonempty type is not the default, and language is not trimmed.
+            script_type = script_type.strip(' \t\n\r\f')
+        if script_type.lower() in (
+                'application/ecmascript', 'application/javascript',
                 'application/x-ecmascript', 'application/x-javascript',
                 'text/ecmascript', 'text/javascript', 'text/javascript1.0',
                 'text/javascript1.1', 'text/javascript1.2', 'text/javascript1.3',
                 'text/javascript1.4', 'text/javascript1.5', 'text/jscript',
                 'text/livescript', 'text/x-ecmascript', 'text/x-javascript'):
+            # Legacy event-handler scripts are inert unless both attributes
+            # identify the window load event. Modules do not use this gate.
+            if 'for' in attrs and 'event' in attrs:
+                target = attrs['for'].strip(' \t\n\r\f').lower()
+                event = attrs['event'].strip(' \t\n\r\f').lower()
+                if target != 'window' or event not in ('onload', 'onload()'):
+                    return None
             return 'classic'
         return None
 
