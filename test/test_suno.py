@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from yt_dlp import YoutubeDL
 from yt_dlp.extractor import SunoIE
+from yt_dlp.extractor.suno import _FlightScripts
 from yt_dlp.utils import ExtractorError
 
 
@@ -295,8 +296,85 @@ class TestSuno(unittest.TestCase):
         with self.assertRaisesRegex(ExtractorError, 'Truncated'):
             self._extract(self._flight_page(genuine.rstrip('\n')))
 
+    def test_html_script_context(self):
+        valid = self._flight_page('b:' + json.dumps(self._model(self.clip)) + '\n')
+        conflict = 'c:' + json.dumps(self._model(dict(self.clip, is_public=False))) + '\n'
+        encoded = json.dumps([1, conflict])
+        for script in (f'<SCRIPT>\n self.__next_f.push ({encoded}); \n</SCRIPT>',
+                       f'<script>self . __next_f . push({encoded})</script>'):
+            with self.subTest(script=script), self.assertRaisesRegex(ExtractorError, 'Conflicting'):
+                self._extract(valid + script)
+        for script in (f'<script>/* prefix */self.__next_f.push({encoded})</script>',
+                       f'<script>self.__next_f.push({encoded})'):
+            with self.subTest(script=script), self.assertRaisesRegex(ExtractorError, 'Flight segment'):
+                self._extract(valid + script)
+        for inert in (f'<!--{valid}-->', f"<div data-text='{valid}'></div>",
+                      f'<textarea>{valid}</textarea>', f'<template>{valid}</template>',
+                      f'<title>{valid}</title>', f'<script type="application/json">{encoded}</script>'):
+            with self.subTest(inert=inert), self.assertRaisesRegex(ExtractorError, 'metadata unavailable'):
+                self._extract(inert)
+        self.assertEqual(self._extract(
+            '<script>(self.__next_f=self.__next_f||[]).push([0]);</script>' + valid)['title'], self.clip['title'])
+
+    def test_flight_discovery_limits(self):
+        with patch.object(_FlightScripts, 'MAX_PAGE_BYTES', 100):
+            with self.assertRaisesRegex(ExtractorError, 'webpage exceeds'):
+                self._extract('é' * 60)
+        with patch.object(_FlightScripts, 'MAX_SCRIPTS', 1):
+            with self.assertRaisesRegex(ExtractorError, 'Too many'):
+                self._extract(self._page(self.clip))
+        with patch.object(_FlightScripts, 'MAX_FLIGHT_BYTES', 10):
+            with self.assertRaisesRegex(ExtractorError, 'data exceeds'):
+                self._extract(self._page(self.clip))
+        with self.assertRaisesRegex(ExtractorError, 'unclosed script'):
+            self._extract('<script>self.__next_f.push(' * 3200)
+
+    def test_duplicate_json_members_and_nonfinite_numbers(self):
+        model = json.dumps(self._model(self.clip))
+        genuine = 'b:' + model + '\n'
+        for value in (model.replace('"is_public": true', '"is_public": false, "is_public": true'),
+                      model.replace('"duration": 231.6', '"duration": NaN'),
+                      model.replace('"duration": 231.6', '"duration": 1e400')):
+            with self.subTest(value=value), self.assertRaisesRegex(ExtractorError, 'Flight model'):
+                self._extract(self._flight_page(genuine + 'c:' + value + '\n'))
+        for payload in ('[2, {"x": 1, "x": 2}]', '[2, Infinity]'):
+            with self.subTest(payload=payload), self.assertRaisesRegex(ExtractorError, 'Flight segment'):
+                self._extract(self._flight_page(genuine) + f'<script>self.__next_f.push({payload})</script>')
+        with self.assertRaisesRegex(ExtractorError, 'Flight hint'):
+            self._extract(self._flight_page(genuine + ':HL{"x":1,"x":2}\n'))
+
+    def test_query_identity(self):
+        other = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+        for key, candidate_id in ((['clips'], self._ID), (['clips', other], self._ID),
+                                  (['clips', None], self._ID), (['clips', 7], self._ID),
+                                  (['clips', self._ID, other], self._ID), (['clips', self._ID], other)):
+            model = self._model(dict(self.clip, id=candidate_id))
+            model[3]['prefetched']['dehydratedState']['queries'][0]['queryKey'] = key
+            for models in ((model, self._model(self.clip)), (self._model(self.clip), model)):
+                flight = ''.join(f'{i:x}:{json.dumps(value)}\n' for i, value in enumerate(models))
+                with self.subTest(key=key, candidate_id=candidate_id), self.assertRaisesRegex(
+                        ExtractorError, 'query identity'):
+                    self._extract(self._flight_page(flight))
+        self.assertEqual(self._extract(self._page(
+            dict(self.clip, id=other), self.clip))['id'], self._ID)
+
+    def test_duplicate_duration_types(self):
+        for pair in ((True, 1), (False, 0), (1, 1.0)):
+            for values in (pair, pair[::-1]):
+                clips = [dict(self.clip, metadata={'duration': value}) for value in values]
+                with self.subTest(values=values), self.assertRaisesRegex(ExtractorError, 'Conflicting'):
+                    self._extract(self._page(*clips))
+
+    def test_extreme_duration_is_omitted(self):
+        for duration in (1e306, 10**300, 86401, -1, 0):
+            with self.subTest(duration=duration):
+                result = self._extract(self._page(dict(self.clip, metadata={'duration': duration})))
+                self.assertNotIn('duration', result)
+                self._process(result)
+
     def test_invalid_redirect(self):
         for final_url in ('https://example.invalid/song/' + self._ID, self._SHARE,
+                          'http://suno.com/song/' + self._ID,
                           'https://suno.com/song/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'):
             with self.subTest(final_url=final_url), self.assertRaises(ExtractorError):
                 self._extract(self._page(self.clip), final_url=final_url)

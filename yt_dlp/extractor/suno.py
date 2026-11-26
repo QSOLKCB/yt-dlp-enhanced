@@ -1,10 +1,110 @@
 import json
 import math
 import re
+from html.parser import HTMLParser
 
 from .common import InfoExtractor
 from ..utils import ExtractorError, parse_iso8601, url_or_none
 from ..utils.traversal import traverse_obj
+
+
+def _strict_json(data):
+    def unique_pairs(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError('Duplicate JSON member')
+            result[key] = value
+        return result
+
+    def finite_number(value):
+        number = float(value)
+        if not math.isfinite(number):
+            raise ValueError('Non-finite JSON number')
+        return number
+
+    return json.loads(data, object_pairs_hook=unique_pairs,
+                      parse_float=finite_number, parse_constant=finite_number)
+
+
+class _FlightScripts(HTMLParser):
+    # Treat raw-text and RCDATA elements as text rather than nested markup.
+    CDATA_CONTENT_ELEMENTS = (*HTMLParser.CDATA_CONTENT_ELEMENTS,
+                              'textarea', 'title', 'xmp', 'iframe', 'noembed', 'noframes', 'noscript')
+    MAX_PAGE_BYTES = 8 * 1024 * 1024
+    MAX_FLIGHT_BYTES = 4 * 1024 * 1024
+    MAX_SCRIPTS = 4096
+    _PUSH = re.compile(r'(?:self\s*\.\s*__next_f|\(\s*self\.__next_f\s*=\s*self\.__next_f\s*\|\|\s*\[\]\s*\))\s*\.\s*push\s*\(')
+
+    def __init__(self):
+        super().__init__(convert_charrefs=False)
+        self.segments = []
+        self._size = 0
+        self._count = 0
+        self._templates = 0
+        self._plaintext = False
+        self._script = None
+
+    def handle_starttag(self, tag, attrs):
+        if self._plaintext:
+            return
+        if tag == 'plaintext':
+            self._plaintext = True
+        elif tag == 'template':
+            self._templates += 1
+        elif tag == 'script':
+            self._count += 1
+            if self._count > self.MAX_SCRIPTS:
+                raise ExtractorError('Too many Suno Flight scripts', expected=True)
+            attrs = dict(attrs)
+            script_type = (attrs.get('type') or '').strip().lower()
+            if (not self._templates and 'src' not in attrs
+                    and script_type in ('', 'module', 'text/javascript', 'application/javascript',
+                                        'text/ecmascript', 'application/ecmascript')):
+                self._script = []
+
+    def handle_startendtag(self, tag, attrs):
+        # A slash does not close non-void HTML raw-text elements or templates.
+        if tag in (*self.CDATA_CONTENT_ELEMENTS, 'template', 'plaintext'):
+            self.handle_starttag(tag, attrs)
+            if tag in self.CDATA_CONTENT_ELEMENTS:
+                self.set_cdata_mode(tag)
+
+    def handle_data(self, data):
+        if self._script is not None:
+            self._script.append(data)
+
+    def handle_endtag(self, tag):
+        if tag == 'template' and self._templates:
+            self._templates -= 1
+        if tag != 'script' or self._script is None:
+            return
+        script = ''.join(self._script).strip()
+        self._script = None
+        if '__next_f' not in script:
+            return
+        match = self._PUSH.match(script)
+        script = script.removesuffix(';').rstrip()
+        if not match or not script.endswith(')'):
+            raise ExtractorError('Invalid Suno Flight segment', expected=True)
+        self._size += len(script.encode('utf-8'))
+        if self._size > self.MAX_FLIGHT_BYTES:
+            raise ExtractorError('Suno Flight data exceeds size limit', expected=True)
+        self.segments.append(script[match.end():-1])
+
+    @classmethod
+    def extract(cls, webpage):
+        parser = cls()
+        try:
+            if len(webpage) > cls.MAX_PAGE_BYTES or len(webpage.encode('utf-8')) > cls.MAX_PAGE_BYTES:
+                raise ExtractorError('Suno webpage exceeds size limit', expected=True)
+            parser.feed(webpage)
+            parser.close()
+        except (ValueError, RecursionError) as e:
+            raise ExtractorError('Invalid Suno HTML or Flight encoding', expected=True) from e
+        if parser._script is not None:
+            raise ExtractorError('Invalid Suno Flight segment: unclosed script', expected=True)
+        return parser.segments
 
 
 class SunoIE(InfoExtractor):
@@ -53,14 +153,14 @@ class SunoIE(InfoExtractor):
             if header.group() == b':':
                 # Validate the hint payload, but never treat it as a model.
                 try:
-                    json.loads(row[2:].decode('utf-8'))
+                    _strict_json(row[2:].decode('utf-8'))
                 except (ValueError, RecursionError) as e:
                     raise ExtractorError('Invalid Suno Flight hint', expected=True) from e
                 continue
             if row and row[0] in b'ABCDEFGHIJKLMNOPQRSTUVWXYZ#rx':
                 continue
             try:
-                yield json.loads(row.decode('utf-8'))
+                yield _strict_json(row.decode('utf-8'))
             except (ValueError, RecursionError) as e:
                 raise ExtractorError('Invalid Suno Flight model', expected=True) from e
 
@@ -81,11 +181,9 @@ class SunoIE(InfoExtractor):
         # The prefetched query can occur after multiline React Flight text rows.
         # Decode the JSON strings without interpreting JavaScript or fetching media.
         chunks = []
-        for segment in re.findall(r'<script\b[^>]*>self\.__next_f\.push\((.*?)</script>', webpage, flags=re.DOTALL):
-            if not segment.endswith(')'):
-                raise ExtractorError('Invalid Suno Flight segment', expected=True)
+        for segment in _FlightScripts.extract(webpage):
             try:
-                payload = json.loads(segment[:-1])
+                payload = _strict_json(segment)
             except (ValueError, RecursionError) as e:
                 raise ExtractorError('Invalid Suno Flight segment', expected=True) from e
             if not isinstance(payload, list) or not payload or type(payload[0]) is not int:
@@ -102,6 +200,7 @@ class SunoIE(InfoExtractor):
                 raise ExtractorError('Invalid or unsupported Suno Flight segment', expected=True)
 
         clip = None
+        clip_identity = None
         for model in self._flight_models(''.join(chunks)):
             for prefetched in self._prefetched_objects(model):
                 for query in traverse_obj(prefetched, ('dehydratedState', 'queries', ..., {dict})):
@@ -110,16 +209,23 @@ class SunoIE(InfoExtractor):
                         continue
                     candidate = traverse_obj(query, ('state', 'data', {dict}))
                     candidate_id = candidate.get('id') if candidate else None
-                    if not isinstance(candidate_id, str) or not re.fullmatch(self._UUID, candidate_id):
+                    key_id = query_key[1] if len(query_key) == 2 else None
+                    key_id = key_id.lower() if isinstance(key_id, str) and re.fullmatch(self._UUID, key_id) else None
+                    candidate_id = candidate_id.lower() if isinstance(candidate_id, str) and re.fullmatch(self._UUID, candidate_id) else None
+                    # An unrelated query can be ignored, but a contradiction involving
+                    # the requested song cannot be discarded in favour of a later record.
+                    if video_id not in (key_id, candidate_id):
                         continue
-                    if candidate_id.lower() != video_id:
-                        continue
+                    if key_id != video_id or candidate_id != video_id:
+                        raise ExtractorError('Inconsistent Suno query identity', expected=True)
                     if type(candidate.get('is_public')) is not bool:
                         raise ExtractorError('Invalid Suno visibility flag', expected=True)
                     candidate = {**candidate, 'id': video_id}
-                    if clip is not None and clip != candidate:
+                    # JSON representation preserves boolean/number type distinctions.
+                    identity = json.dumps(candidate, sort_keys=True)
+                    if clip_identity is not None and clip_identity != identity:
                         raise ExtractorError('Conflicting Suno song metadata', expected=True)
-                    clip = candidate
+                    clip, clip_identity = candidate, identity
         if not clip or clip.get('is_public') is not True or clip.get('status') != 'complete':
             raise ExtractorError('Public Suno song metadata unavailable', expected=True)
         return clip
@@ -129,7 +235,7 @@ class SunoIE(InfoExtractor):
         webpage, handle = self._download_webpage_handle(
             'https://' + url.split('://', 1)[1], match.group('id') or match.group('share_id'))
         final_match = self._match_valid_url(handle.url)
-        if not final_match or not final_match.group('id'):
+        if not final_match or not final_match.group('id') or not handle.url.lower().startswith('https://'):
             raise ExtractorError('Suno did not return a canonical song URL', expected=True)
         video_id = final_match.group('id').lower()
         if match.group('id') and match.group('id').lower() != video_id:
@@ -144,7 +250,8 @@ class SunoIE(InfoExtractor):
             'thumbnail': ('image_url', {url_or_none}),
         })
         duration = traverse_obj(clip, ('metadata', 'duration'))
-        if type(duration) in (int, float) and 0 < duration < math.inf:
+        # Conservative one-day metadata ceiling, not a provider duration guarantee.
+        if type(duration) in (int, float) and 0 < duration <= 86400:
             info['duration'] = duration
 
         title = info.get('title') or self._og_search_title(webpage)
